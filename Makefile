@@ -1,4 +1,5 @@
-CFLAGS = -Wall -pedantic --std=c11 -O0 -g
+OPTFLAGS = -O2
+CFLAGS = -Wall -pedantic --std=c11 $(OPTFLAGS)
 OBJS = main.o sha256.o
 
 
