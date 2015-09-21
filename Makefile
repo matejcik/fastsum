@@ -1,19 +1,19 @@
-CFLAGS = -Wall -pedantic --std=c11
-OBJS = main.o hash.o
+CFLAGS = -Wall -pedantic --std=c11 -O0 -g
+OBJS = main.o sha256.o
 
 
-fasthash: $(OBJS)
+fastsum: $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS)
 
-hash.c: hash.h
+sha256.c: sha256.h
 
-main.c: hash.h
+main.c: sha256.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $<
 
-all: fasthash
+all: fastsum
 
 clean:
 	rm -f $(OBJS)
-	rm -f fasthash
+	rm -f fastsum

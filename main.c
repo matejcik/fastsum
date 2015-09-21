@@ -5,16 +5,18 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#include "hash.h"
+#include "sha256.h"
+
+#define BLOCKSIZE (16 * 1024)
 
 void print_usage()
 {
-	printf("Usage: fasthash [FILE]...");
+	printf("Usage: fastsum [FILE]...");
 }
 
 int main (int argc, char **argv)
 {
-	if (argc < 1) {
+	if (argc < 2) {
 		print_usage();
 		exit(0);
 	}
@@ -26,12 +28,11 @@ int main (int argc, char **argv)
 			continue;
 		}
 
-		struct hash hash;
-		char buffer[HASH_BLOCKSIZE];
-		hash_init(&hash);
+		char buffer[BLOCKSIZE];
+		char result[HASH_SIZE];
 
 		for (;;) {
-			ssize_t bytes_read = read(fd, buffer, HASH_BLOCKSIZE);
+			ssize_t bytes_read = read(fd, buffer, BLOCKSIZE);
 			if (bytes_read == -1) {
 				fprintf(stderr, "While processing %s: %s\n", argv[i], strerror(errno));
 				close(fd);
@@ -40,12 +41,12 @@ int main (int argc, char **argv)
 				/* eof */
 				break;
 			} else {
-				hash_extend(&hash, buffer, bytes_read);
+				sha256_hash_block(buffer, bytes_read, result);
 			}
 		}
 
-		hash_finalize(&hash);
-		printf("%s  %s\n", hash.hexrepr, argv[i]);
+		for(int i = 0; i < 32; i++) printf("%.2hhx", result[i]);
+		printf("\n");
 	continue_outerloop:
 		;
 	}
