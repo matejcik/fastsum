@@ -1,4 +1,8 @@
+#define _DEFAULT_SOURCE
+/* for dirent entry types, we might not need this after all? */
+
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -20,6 +24,8 @@
 
 #define BLOCKSIZE (16 * 1024)
 #define QUEUE_SIZE (16 * 1024)
+
+#define BIGFILE_LIMIT (1024 * 1024)
 
 /* task types */
 typedef enum { FILE_TASK, HASH_TASK } task_type;
@@ -77,74 +83,37 @@ queue_t file_queue;
 queue_t hash_queue;
 queue_t completed_queue;
 
+_Atomic int directories_enqueued = ATOMIC_VAR_INIT(0);
 _Atomic int files_done = ATOMIC_VAR_INIT(0);
+_Atomic int files_posted = ATOMIC_VAR_INIT(0);
+pthread_mutex_t bigfile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
 /* worker threads */
 
+void do_process_file (file_t *, off_t size);
+void do_process_directory (file_t *);
+
 void * file_worker (void * unused)
 {
-	struct stat stat;
-	char * data = NULL;
+	struct stat st;
 
 	for (;;) {
-		int err_flag = 1;
-		int work_posted = 0;
-
 		file_t * file = queue_pop(&file_queue);
 		if (file == NULL) return NULL;
-		
-		/* simplistic read()ing */
-		int fd = open(file->path, O_RDONLY);
-		if (fd == -1) goto end;
 
-		int res = fstat(fd, &stat);
-		if (res == -1) goto end;
-
-		file->size = stat.st_size;
-		uint64_t chunks = file->size / BLOCKSIZE;
-		assert(chunks <= SIZE_MAX);
-		if (file->size % BLOCKSIZE) chunks += 1;
-
-		file->l1hashes = malloc(chunks * HASH_SIZE);
-		if (file->l1hashes == NULL) goto end;
-		file->l1hashes_size = chunks * HASH_SIZE;
-
-		char * resultptr = file->l1hashes;
-		for (;;) {
-			data = malloc(BLOCKSIZE);
-			if (data == NULL) goto end;
-			ssize_t bytes_read = read(fd, data, BLOCKSIZE);
-			/* todo handle errors correctly, take care of EINTR */
-			if (bytes_read == -1) goto end;
-
-			hash_t * hash = malloc(sizeof(hash_t));
-			if (hash == NULL) goto end;
-
-			hash->type = HASH_TASK;
-			hash->file = file;
-
-			hash->result = resultptr;
-			hash->data = data;
-			hash->length = bytes_read;
-
-			queue_push(&hash_queue, hash);
-			work_posted += 1;
-			data = NULL;
-
-			/* on eof, break */
-			if (bytes_read < BLOCKSIZE) break;
-		}
-
-		err_flag = 0;
-	end:
-		close(fd);
-		if (err_flag) {
-			free(data);
+		int res = stat(file->path, &st);
+		if (res == -1) {
 			file->error = strerror(errno);
+			queue_push(&completed_queue, file);
+			continue;
 		}
-		file->work_posted = work_posted;
-		queue_push(&completed_queue, file);
+
+		int mode = st.st_mode & S_IFMT;
+		if (mode == S_IFREG)
+			do_process_file(file, st.st_size);
+		else if (mode == S_IFDIR)
+			do_process_directory(file);
 	}
 }
 
@@ -205,6 +174,9 @@ void * completion_worker (void * unused)
 	}
 }
 
+
+/* auxilliary functions */
+
 void file_dealloc (file_t * file)
 {
 	free(file->l1hashes);
@@ -212,6 +184,143 @@ void file_dealloc (file_t * file)
 	free(file);
 
 	files_done += 1;
+}
+
+void do_process_directory (file_t * dir)
+{
+	DIR * dirfd;
+	struct dirent * dirent;
+	file_t * file = NULL;
+	char * newpath = NULL;
+
+	int pathlen = strlen(dir->path);
+
+	/* TODO lock bigfile mutex for directories as well? */
+	pthread_mutex_lock(&bigfile_mutex);
+	/* we don't need to hold it */
+	pthread_mutex_unlock(&bigfile_mutex);
+
+	dirfd = opendir(dir->path);
+	if (dirfd == NULL) goto error;
+
+	errno = 0;
+	while ((dirent = readdir(dirfd))) {
+		if (dirent->d_name[0] == '.' &&
+		     (dirent->d_name[1] == 0 ||
+		       (dirent->d_name[1] == '.' && dirent->d_name[2] == 0)
+		     )
+		   ) continue;
+
+		file_t * file = malloc(sizeof(file_t));
+		if (file == NULL) goto error;
+		memset(file, 0, sizeof(file_t));
+
+		int len = strlen(dirent->d_name);
+		newpath = malloc(pathlen + 1 + len + 1);
+		if (newpath == NULL) goto error;
+		strncpy(newpath, dir->path, pathlen);
+		newpath[pathlen] = '/';
+		strncpy(newpath + pathlen + 1, dirent->d_name, len);
+		newpath[pathlen + 1 + len] = 0;
+
+		file->type = FILE_TASK;
+		file->path = newpath;
+		file->state = STARTED;
+		if (dirent->d_type == DT_DIR) directories_enqueued += 1;
+		queue_push(&file_queue, file);
+
+		newpath = NULL;
+		file = NULL;
+		files_posted += 1;
+	}
+
+	directories_enqueued -= 1;
+
+	if (!errno) {
+		closedir(dirfd);
+		file_dealloc(dir);
+		return;
+	}
+
+error:
+	dir->error = strerror(errno);
+	free(file);
+	free(newpath);
+	closedir(dirfd);
+	queue_push(&completed_queue, dir);
+}
+
+void do_process_file (file_t * file, off_t size)
+{
+	int err_flag = 1;
+	int work_posted = 0;
+	int fd = -1;
+	char * data = NULL;
+
+	/* enter "bigfile" crit section */
+	pthread_mutex_lock(&bigfile_mutex);
+	/* if this is not big file, leave immediately */
+	if (size < BIGFILE_LIMIT) pthread_mutex_unlock(&bigfile_mutex);
+
+	/* simplistic read()ing */
+	fd = open(file->path, O_RDONLY);
+	if (fd == -1) goto end;
+
+	file->size = size;
+	uint64_t chunks = file->size / BLOCKSIZE;
+	assert(chunks <= SIZE_MAX);
+	if (file->size % BLOCKSIZE) chunks += 1;
+
+	file->l1hashes = malloc(chunks * HASH_SIZE);
+	if (file->l1hashes == NULL) goto end;
+	
+	char * resultptr = file->l1hashes;
+	for (;;) {
+		data = malloc(BLOCKSIZE);
+		if (data == NULL) goto end;
+		ssize_t bytes_read = read(fd, data, BLOCKSIZE);
+		/* todo handle errors correctly, take care of EINTR */
+		if (bytes_read == -1) goto end;
+
+		/* filesize is multiple of BLOCKSIZE and eof happened */
+		if (!bytes_read) break;
+
+		if (work_posted == chunks) {
+			/* unexpected successful read over limit */
+			/* set custom error */
+			file->error = "File grew while hashing";
+			goto end;
+		}
+
+		hash_t * hash = malloc(sizeof(hash_t));
+		if (hash == NULL) goto end;
+
+		hash->type = HASH_TASK;
+		hash->file = file;
+
+		hash->result = resultptr;
+		hash->data = data;
+		hash->length = bytes_read;
+
+		queue_push(&hash_queue, hash);
+		work_posted += 1;
+		data = NULL;
+
+		/* on eof, break */
+		if (bytes_read < BLOCKSIZE) break;
+	}
+
+	err_flag = 0;
+end:
+	if (err_flag) {
+		free(data);
+		if (!file->error) file->error = strerror(errno);
+	}
+	if (size >= BIGFILE_LIMIT) pthread_mutex_unlock(&bigfile_mutex);
+	close(fd);
+	file->work_posted = work_posted;
+	file->l1hashes_size = work_posted * HASH_SIZE;
+	queue_push(&completed_queue, file);
 }
 
 void do_complete_file_l1 (file_t * file)
@@ -259,9 +368,8 @@ int main (int argc, char **argv)
 		exit(0);
 	}
 
-	int files_posted = 0;
 	int hash_threadnum = get_nprocs();
-	int file_threadnum = 16;
+	int file_threadnum = 1;
 
 	/* initialize queues */
 	queue_init(&file_queue, QUEUE_SIZE);
@@ -283,9 +391,12 @@ int main (int argc, char **argv)
 	for (int i = 1; i < argc; ++i) {
 		file_t * file = xmalloc(sizeof(file_t));
 		file->type = FILE_TASK;
-		int len = strlen(argv[i]) + 1;
-		file->path = xmalloc(len);
-		strncpyz(file->path, argv[i], len);
+		file->path = strdup(argv[i]);
+
+		/* strip trailing slash(es) */
+		int len = strlen(file->path);
+		while (file->path[len] == '/') file->path[len--] = 0;
+
 		file->state = STARTED;
 		queue_push(&file_queue, file);
 		files_posted += 1;
@@ -293,6 +404,8 @@ int main (int argc, char **argv)
 
 	/* busy-wait for files finished because why not */
 	struct timespec sleep100ms = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
+	/* now silently pray that all directories are enumerated before hashing
+	 * catches up with number of processed files */
 	while (files_posted != files_done) {
 		nanosleep(&sleep100ms, NULL);
 	}
