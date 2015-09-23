@@ -1,19 +1,13 @@
 OPTFLAGS = -O2
-CFLAGS = -Wall -pedantic --std=c11 $(OPTFLAGS)
+CFLAGS = -Wall -pedantic --std=c11 -D_POSIX_C_SOURCE=9999999999 $(OPTFLAGS)
 LDFLAGS = -pthread
-OBJS = main.o sha256.o queue.o
+OBJS = main.o sha256.o queue.o tools.o
 
 
 fastsum: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS)
 
-sha256.c: sha256.h
-
-main.c: sha256.h queue.h
-
-queue.c: queue.h
-
-%.o: %.c
+%.o: %.c *.h
 	$(CC) $(CFLAGS) -c $<
 
 all: fastsum
