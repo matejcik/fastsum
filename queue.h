@@ -10,6 +10,8 @@ typedef struct queue {
 	size_t size;
 	size_t head, tail;
 
+	int dynamic;
+
 	_Atomic int closed;
 	sem_t consumable;
 	sem_t produceable;
@@ -17,6 +19,7 @@ typedef struct queue {
 } queue_t;
 
 void queue_init (queue_t *queue, size_t capacity);
+void queue_init_dynamic (queue_t *queue, size_t initial_capacity);
 void queue_push (queue_t *queue, void *item);
 void* queue_pop (queue_t *queue);
 void queue_stop (queue_t *queue);

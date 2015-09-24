@@ -92,7 +92,6 @@ pthread_mutex_t bigfile_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* worker threads */
 
 void do_process_file (file_t *, off_t size);
-void do_process_directory (file_t *);
 
 void * file_worker (void * unused)
 {
@@ -110,10 +109,13 @@ void * file_worker (void * unused)
 		}
 
 		int mode = st.st_mode & S_IFMT;
-		if (mode == S_IFREG)
+		if (mode == S_IFREG) {
 			do_process_file(file, st.st_size);
-		else if (mode == S_IFDIR)
-			do_process_directory(file);
+		} else {
+			file->error = "Not a regular file";
+			queue_push(&completed_queue, file);
+			continue;
+		}
 	}
 }
 
@@ -186,70 +188,6 @@ void file_dealloc (file_t * file)
 	files_done += 1;
 }
 
-void do_process_directory (file_t * dir)
-{
-	DIR * dirfd;
-	struct dirent * dirent;
-	file_t * file = NULL;
-	char * newpath = NULL;
-
-	int pathlen = strlen(dir->path);
-
-	/* TODO lock bigfile mutex for directories as well? */
-	pthread_mutex_lock(&bigfile_mutex);
-	/* we don't need to hold it */
-	pthread_mutex_unlock(&bigfile_mutex);
-
-	dirfd = opendir(dir->path);
-	if (dirfd == NULL) goto error;
-
-	errno = 0;
-	while ((dirent = readdir(dirfd))) {
-		if (dirent->d_name[0] == '.' &&
-		     (dirent->d_name[1] == 0 ||
-		       (dirent->d_name[1] == '.' && dirent->d_name[2] == 0)
-		     )
-		   ) continue;
-
-		file_t * file = malloc(sizeof(file_t));
-		if (file == NULL) goto error;
-		memset(file, 0, sizeof(file_t));
-
-		int len = strlen(dirent->d_name);
-		newpath = malloc(pathlen + 1 + len + 1);
-		if (newpath == NULL) goto error;
-		strncpy(newpath, dir->path, pathlen);
-		newpath[pathlen] = '/';
-		strncpy(newpath + pathlen + 1, dirent->d_name, len);
-		newpath[pathlen + 1 + len] = 0;
-
-		file->type = FILE_TASK;
-		file->path = newpath;
-		file->state = STARTED;
-		if (dirent->d_type == DT_DIR) directories_enqueued += 1;
-		queue_push(&file_queue, file);
-
-		newpath = NULL;
-		file = NULL;
-		files_posted += 1;
-	}
-
-	directories_enqueued -= 1;
-
-	if (!errno) {
-		closedir(dirfd);
-		file_dealloc(dir);
-		return;
-	}
-
-error:
-	dir->error = strerror(errno);
-	free(file);
-	free(newpath);
-	closedir(dirfd);
-	queue_push(&completed_queue, dir);
-}
-
 void do_process_file (file_t * file, off_t size)
 {
 	int err_flag = 1;
@@ -304,6 +242,7 @@ void do_process_file (file_t * file, off_t size)
 
 		queue_push(&hash_queue, hash);
 		work_posted += 1;
+		resultptr += HASH_SIZE;
 		data = NULL;
 
 		/* on eof, break */
@@ -356,6 +295,89 @@ void do_complete_file_l2 (file_t * file)
 	file_dealloc(file);
 }
 
+
+/* directory enqueue function */
+
+void do_process_directory (char * path)
+{
+	DIR * dirfd;
+	struct dirent * dirent;
+	file_t * file = NULL;
+	char * newpath = NULL;
+
+	int pathlen = strlen(path);
+
+	/* TODO lock bigfile mutex for directories as well? */
+	pthread_mutex_lock(&bigfile_mutex);
+	/* we don't need to hold it */
+	pthread_mutex_unlock(&bigfile_mutex);
+
+	dirfd = opendir(path);
+	if (dirfd == NULL) goto error;
+
+	errno = 0;
+	while ((dirent = readdir(dirfd))) {
+		if (dirent->d_name[0] == '.' &&
+		     (dirent->d_name[1] == 0 ||
+		       (dirent->d_name[1] == '.' && dirent->d_name[2] == 0)
+		     )
+		   ) continue;
+
+		int len = strlen(dirent->d_name);
+		newpath = malloc(pathlen + 1 + len + 1);
+		if (newpath == NULL) goto error;
+		strncpy(newpath, path, pathlen);
+		newpath[pathlen] = '/';
+		strncpy(newpath + pathlen + 1, dirent->d_name, len);
+		newpath[pathlen + 1 + len] = 0;
+
+		if (dirent->d_type == DT_DIR) {
+			directories_enqueued += 1;
+			do_process_directory(newpath);
+			free(newpath);
+			newpath = NULL;
+			continue;
+		}
+
+		file = malloc(sizeof(file_t));
+		if (file == NULL) goto error;
+		memset(file, 0, sizeof(file_t));
+
+		file->type = FILE_TASK;
+		file->path = newpath;
+		file->state = STARTED;
+		queue_push(&file_queue, file);
+		files_posted += 1;
+
+		newpath = NULL;
+		file = NULL;
+	}
+
+
+	if (!errno) {
+		/* decrement only after processing */
+		directories_enqueued -= 1;
+		closedir(dirfd);
+		return;
+	}
+
+error:
+	/* decrement only after processing */
+	directories_enqueued -= 1;
+	/* print error in completion thread */
+	file_t * dir = malloc(sizeof(file_t));
+	if (dir != NULL) {
+		memset(dir, 0, sizeof(file_t));
+		dir->error = strerror(errno);
+		dir->path = strdup(path);
+		dir->state = STARTED;
+		queue_push(&completed_queue, dir);
+	}
+	free(file);
+	free(newpath);
+	closedir(dirfd);
+}
+
 void print_usage()
 {
 	printf("Usage: fastsum [FILE]...");
@@ -374,7 +396,7 @@ int main (int argc, char **argv)
 	/* initialize queues */
 	queue_init(&file_queue, QUEUE_SIZE);
 	queue_init(&hash_queue, QUEUE_SIZE);
-	queue_init(&completed_queue, 256);
+	queue_init_dynamic(&completed_queue, 4);
 
 	/* initialize workers */
 	pthread_t * file_threads = xmalloc(sizeof(pthread_t) * file_threadnum);
@@ -389,6 +411,8 @@ int main (int argc, char **argv)
 	pthread_create(&completion_thread, NULL, completion_worker, NULL);
 
 	for (int i = 1; i < argc; ++i) {
+		struct stat st;
+
 		file_t * file = xmalloc(sizeof(file_t));
 		file->type = FILE_TASK;
 		file->path = strdup(argv[i]);
@@ -396,6 +420,18 @@ int main (int argc, char **argv)
 		/* strip trailing slash(es) */
 		int len = strlen(file->path);
 		while (file->path[len] == '/') file->path[len--] = 0;
+
+		/* we need to post error messages to completion thread o_O */
+		int res = stat(argv[i], &st);
+		if (res == -1) {
+			file->error = strerror(errno);
+		} else if ((st.st_mode & S_IFMT) == S_IFDIR) {
+			directories_enqueued += 1;
+			do_process_directory(file->path);
+			free(file->path);
+			free(file);
+			continue;
+		}
 
 		file->state = STARTED;
 		queue_push(&file_queue, file);
@@ -406,7 +442,7 @@ int main (int argc, char **argv)
 	struct timespec sleep100ms = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
 	/* now silently pray that all directories are enumerated before hashing
 	 * catches up with number of processed files */
-	while (files_posted != files_done) {
+	while (files_posted != files_done || directories_enqueued > 0) {
 		nanosleep(&sleep100ms, NULL);
 	}
 

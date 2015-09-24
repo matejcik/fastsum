@@ -1,8 +1,12 @@
+#include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <semaphore.h>
 
 #include "queue.h"
+#include "tools.h"
 
 void queue_init (queue_t *queue, size_t capacity)
 {
@@ -13,26 +17,58 @@ void queue_init (queue_t *queue, size_t capacity)
 	queue->head = queue->tail = 0;
 	queue->closed = 0;
 
+	queue->dynamic = 0;
+
 	pthread_mutex_init(&queue->mutex, NULL);
 	sem_init(&queue->consumable, 0, 0);
 	sem_init(&queue->produceable, 0, capacity);
 }
 
+void queue_init_dynamic (queue_t *queue, size_t initial_capacity)
+{
+	queue_init(queue, initial_capacity);
+	queue->dynamic = 1;
+}
+
 void queue_push (queue_t *queue, void *item)
 {
-	/* ensure this space for product */
-	sem_wait(&queue->produceable);
-	/* return space if queue closed */
-	if (queue->closed) {
-		sem_post(&queue->produceable);
+	if (!queue->dynamic) {
+		/* ensure this space for product */
+		sem_wait(&queue->produceable);
+		/* return space if queue closed */
+		if (queue->closed) {
+			sem_post(&queue->produceable);
+			return;
+		}
+	} else if (queue->closed) {
 		return;
 	}
+
 	/* lock modify mutex */
 	pthread_mutex_lock(&queue->mutex);
+
+	if (queue->dynamic && queue->size == queue->capacity) {
+		assert(queue->head == queue->tail);
+		/* allocate additional space */
+		int newcap = queue->capacity * 2;
+		queue->items = xrealloc(queue->items, newcap * sizeof(void*));
+
+		/* shuffle items around so that queue starts at 0 */
+		if (queue->tail > 0) {
+			memcpy(queue->items + queue->capacity, queue->items, queue->tail * sizeof(void*));
+			memmove(queue->items, queue->items + queue->tail, (queue->capacity - queue->tail) * sizeof(void*));
+			memcpy(queue->items + queue->tail, queue->items + queue->capacity, queue->tail * sizeof(void*));
+			queue->tail = 0;
+		}
+		queue->head = queue->capacity;
+		queue->capacity = newcap;
+	}
 
 	/* perform insertion */
 	queue->items[queue->head] = item;
 	queue->head = (queue->head + 1) % queue->capacity;
+
+	queue->size += 1;
 
 	/* enable consumer to enter pop-mode */
 	sem_post(&queue->consumable);
@@ -57,8 +93,11 @@ void * queue_pop (queue_t *queue)
 	void * item = queue->items[queue->tail];
 	queue->tail = (queue->tail + 1) % queue->capacity;
 
+	queue->size -= 1;
+
 	/* free up space for product */
-	sem_post(&queue->produceable);
+	if (!queue->dynamic)
+		sem_post(&queue->produceable);
 	/* unlock modify mutex */
 	pthread_mutex_unlock(&queue->mutex);
 
