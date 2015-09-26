@@ -27,6 +27,17 @@ combined with high seek latency, which is where the multithreaded reading should
 (it is untested at the moment)
 
 
+Compiling
+---------
+
+Use `make`. You will need gcc with C11 support and `stdatomic.h`.
+
+To install system-wide, copy `fastsum` to `/usr/bin`.
+
+The code is actually "mostly portable", but tweaks are necessary if you want to use it
+on anything other than GNU/Linux.
+
+
 Code Overview
 -------------
 
