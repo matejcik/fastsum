@@ -11,7 +11,7 @@
 void queue_init (queue_t *queue, size_t capacity)
 {
 	queue->items = malloc(capacity * sizeof(void*));
-	queue->capacity = capacity;
+	queue->initial_capacity = queue->capacity = capacity;
 	queue->size = 0;
 
 	queue->head = queue->tail = 0;
@@ -50,18 +50,20 @@ void queue_push (queue_t *queue, void *item)
 	if (queue->dynamic && queue->size == queue->capacity) {
 		assert(queue->head == queue->tail);
 		/* allocate additional space */
-		int newcap = queue->capacity * 2;
-		queue->items = xrealloc(queue->items, newcap * sizeof(void*));
+		int newcap = queue->capacity + queue->initial_capacity;
+		fprintf(stderr,"realloc to %d\n", newcap);
+		void ** newitems = xmalloc(newcap * sizeof(void*));
+		fprintf(stderr,"realloc to %d done\n", newcap);
+		/* copy items so that queue starts at 0 */
+		memcpy(newitems, queue->items + queue->tail, (queue->capacity - queue->tail) * sizeof(void*));
+		memcpy(newitems + (queue->capacity - queue->tail), queue->items, queue->tail * sizeof(void*));
 
-		/* shuffle items around so that queue starts at 0 */
-		if (queue->tail > 0) {
-			memcpy(queue->items + queue->capacity, queue->items, queue->tail * sizeof(void*));
-			memmove(queue->items, queue->items + queue->tail, (queue->capacity - queue->tail) * sizeof(void*));
-			memcpy(queue->items + queue->tail, queue->items + queue->capacity, queue->tail * sizeof(void*));
-			queue->tail = 0;
-		}
+		queue->tail = 0;
 		queue->head = queue->capacity;
 		queue->capacity = newcap;
+
+		free(queue->items);
+		queue->items = newitems;
 	}
 
 	/* perform insertion */

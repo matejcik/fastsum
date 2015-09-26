@@ -396,7 +396,7 @@ int main (int argc, char **argv)
 	/* initialize queues */
 	queue_init(&file_queue, QUEUE_SIZE);
 	queue_init(&hash_queue, QUEUE_SIZE);
-	queue_init_dynamic(&completed_queue, 4);
+	queue_init_dynamic(&completed_queue, QUEUE_SIZE);
 
 	/* initialize workers */
 	pthread_t * file_threads = xmalloc(sizeof(pthread_t) * file_threadnum);
@@ -442,7 +442,7 @@ int main (int argc, char **argv)
 	struct timespec sleep100ms = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
 	/* now silently pray that all directories are enumerated before hashing
 	 * catches up with number of processed files */
-	while (files_posted != files_done || directories_enqueued > 0) {
+	while (files_posted > files_done || directories_enqueued > 0) {
 		nanosleep(&sleep100ms, NULL);
 	}
 

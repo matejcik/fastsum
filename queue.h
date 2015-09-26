@@ -7,6 +7,7 @@
 typedef struct queue {
 	void** items;
 	size_t capacity;
+	size_t initial_capacity;
 	size_t size;
 	size_t head, tail;
 
