@@ -18,6 +18,8 @@
 #include <stdatomic.h>
 #include <pthread.h>
 
+#include <getopt.h>
+
 #include "sha256.h"
 #include "queue.h"
 #include "tools.h"
@@ -380,18 +382,45 @@ error:
 
 void print_usage()
 {
-	printf("Usage: fastsum [FILE]...");
+	printf("Usage: fastsum [FILE]...\n"
+		"Options:\n"
+		"  -w, --hash-workers=NUM     use a specified number of hash worker threads\n"
+		"                             default: number of available CPU cores\n"
+		"  -f, --file-workers=NUM     use a specified number of file reader threads\n"
+		"                             default: 16\n"
+	);
 }
 
 int main (int argc, char **argv)
 {
-	if (argc < 2) {
-		print_usage();
-		exit(0);
+	int hash_threadnum = get_nprocs();
+	int file_threadnum = 16;
+
+	static struct option long_opts[] = {
+		{ "hash-workers", required_argument, 0, 'w' },
+		{ "file-workers", required_argument, 0, 'f' },
+		{ 0, 0, 0, 0 }
+	};
+
+	int opt;
+	while ((opt = getopt_long(argc, argv, "h:f:", long_opts, NULL)) != -1) {
+		switch (opt) {
+			case 'w':
+				hash_threadnum = atoi(optarg);
+				break;
+			case 'f':
+				file_threadnum = atoi(optarg);
+				break;
+			default:
+				print_usage();
+				exit(1);
+		}
 	}
 
-	int hash_threadnum = get_nprocs();
-	int file_threadnum = 1;
+	if (optind >= argc) {
+		print_usage();
+		exit(1);
+	}
 
 	/* initialize queues */
 	queue_init(&file_queue, QUEUE_SIZE);
@@ -410,7 +439,7 @@ int main (int argc, char **argv)
 	pthread_t completion_thread;
 	pthread_create(&completion_thread, NULL, completion_worker, NULL);
 
-	for (int i = 1; i < argc; ++i) {
+	for (int i = optind; i < argc; ++i) {
 		struct stat st;
 
 		file_t * file = xmalloc(sizeof(file_t));
@@ -440,8 +469,6 @@ int main (int argc, char **argv)
 
 	/* busy-wait for files finished because why not */
 	struct timespec sleep100ms = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
-	/* now silently pray that all directories are enumerated before hashing
-	 * catches up with number of processed files */
 	while (files_posted > files_done || directories_enqueued > 0) {
 		nanosleep(&sleep100ms, NULL);
 	}
