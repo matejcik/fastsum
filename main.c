@@ -1,6 +1,3 @@
-#define _DEFAULT_SOURCE
-/* for dirent entry types, we might not need this after all? */
-
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -429,15 +426,20 @@ int main (int argc, char **argv)
 
 	/* initialize workers */
 	pthread_t * file_threads = xmalloc(sizeof(pthread_t) * file_threadnum);
-	for (int i = 0; i < file_threadnum; ++i)
+	for (int i = 0; i < file_threadnum; ++i) {
 		pthread_create(&file_threads[i], NULL, file_worker, NULL);
+		pthread_setname_np(file_threads[i], "fastsum-filew");
+	}
 
 	pthread_t * hash_threads = xmalloc(sizeof(pthread_t) * hash_threadnum);
-	for (int i = 0; i < hash_threadnum; ++i)
+	for (int i = 0; i < hash_threadnum; ++i) {
 		pthread_create(&hash_threads[i], NULL, hash_worker, NULL);
+		pthread_setname_np(hash_threads[i], "fastsum-hashw");
+	}
 
 	pthread_t completion_thread;
 	pthread_create(&completion_thread, NULL, completion_worker, NULL);
+	pthread_setname_np(completion_thread, "fastsum-complw");
 
 	for (int i = optind; i < argc; ++i) {
 		struct stat st;

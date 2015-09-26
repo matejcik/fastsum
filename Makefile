@@ -1,5 +1,5 @@
 OPTFLAGS = -O2
-CFLAGS = -Wall -pedantic --std=c11 -D_POSIX_C_SOURCE=9999999999 $(OPTFLAGS)
+CFLAGS = -Wall -pedantic --std=c11 -D_POSIX_C_SOURCE=9999999999 -D_GNU_SOURCE $(OPTFLAGS)
 LDFLAGS = -pthread
 OBJS = main.o sha256.o queue.o tools.o
 
