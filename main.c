@@ -24,7 +24,7 @@
 #define BLOCKSIZE (16 * 1024)
 #define QUEUE_SIZE (16 * 1024)
 
-#define BIGFILE_LIMIT (1024 * 1024)
+#define BIGFILE_LIMIT (256 * 1024)
 
 /* task types */
 typedef enum { FILE_TASK, HASH_TASK } task_type;
@@ -85,7 +85,9 @@ queue_t completed_queue;
 _Atomic int directories_enqueued = ATOMIC_VAR_INIT(0);
 _Atomic int files_done = ATOMIC_VAR_INIT(0);
 _Atomic int files_posted = ATOMIC_VAR_INIT(0);
+
 pthread_mutex_t bigfile_mutex = PTHREAD_MUTEX_INITIALIZER;
+int bigfile_limit = BIGFILE_LIMIT;
 
 
 /* worker threads */
@@ -197,7 +199,7 @@ void do_process_file (file_t * file, off_t size)
 	/* enter "bigfile" crit section */
 	pthread_mutex_lock(&bigfile_mutex);
 	/* if this is not big file, leave immediately */
-	if (size < BIGFILE_LIMIT) pthread_mutex_unlock(&bigfile_mutex);
+	if (size < bigfile_limit) pthread_mutex_unlock(&bigfile_mutex);
 
 	/* simplistic read()ing */
 	fd = open(file->path, O_RDONLY);
@@ -254,7 +256,7 @@ end:
 		free(data);
 		if (!file->error) file->error = strerror(errno);
 	}
-	if (size >= BIGFILE_LIMIT) pthread_mutex_unlock(&bigfile_mutex);
+	if (size >= bigfile_limit) pthread_mutex_unlock(&bigfile_mutex);
 	close(fd);
 	file->work_posted = work_posted;
 	file->l1hashes_size = work_posted * HASH_SIZE;
@@ -382,9 +384,13 @@ void print_usage()
 	printf("Usage: fastsum [FILE]...\n"
 		"Options:\n"
 		"  -w, --hash-workers=NUM     use a specified number of hash worker threads\n"
-		"                             default: number of available CPU cores\n"
+		"                             Default: number of available CPU cores\n"
 		"  -f, --file-workers=NUM     use a specified number of file reader threads\n"
-		"                             default: 16\n"
+		"                             Default: 16\n"
+		"  -b, --big=NUM              set the bigfile limit: when reading files larger\n"
+		"                             than this, other file readers will stop so that\n"
+		"                             the big file can be read continuously.\n"
+		"                             You can use 'k' and 'M' suffixes. Default: 256k\n"
 	);
 }
 
@@ -396,17 +402,26 @@ int main (int argc, char **argv)
 	static struct option long_opts[] = {
 		{ "hash-workers", required_argument, 0, 'w' },
 		{ "file-workers", required_argument, 0, 'f' },
+		{ "big",          required_argument, 0, 'b' },
 		{ 0, 0, 0, 0 }
 	};
 
 	int opt;
-	while ((opt = getopt_long(argc, argv, "h:f:", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "h:f:b:", long_opts, NULL)) != -1) {
 		switch (opt) {
 			case 'w':
 				hash_threadnum = atoi(optarg);
 				break;
 			case 'f':
 				file_threadnum = atoi(optarg);
+				break;
+			case 'b':
+				bigfile_limit = atoi(optarg);
+				int m = strlen(optarg);
+				if (optarg[m] == 'M')
+					bigfile_limit *= 1024 * 1024;
+				else if (optarg[m] == 'k')
+					bigfile_limit *= 1024;
 				break;
 			default:
 				print_usage();
