@@ -16,8 +16,8 @@ system to reorder and service the requests more efficiently. The code also only 
 one thread at a time to read large files, on the assumption that sequentially reading
 a large file is faster than interrupting the sequential read by seeks elsewhere.
 
-(For purposes of fastsum, "large file" is anything over 1MB. This should probably
-be configurable.)
+(For purposes of fastsum, "large file" is anything over 256 kB. You can specify the limit
+by the `-b` argument, accepted suffixes are 'k' and 'M'.)
 
 If you use a traditional spinning drive, your read speeds are going to be so low that
 the whole task will be I/O bound. Fastsum is probably useless for you, a plain sha256sum
